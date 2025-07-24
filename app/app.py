@@ -1,22 +1,19 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import List, Optional, Dict
+from typing import List
 import requests
 import datetime
 import uuid
 from openai import OpenAI
 
-from app.config import get_settings
+from app.ai.conversation import create_conversation, add_message_to_conversation, build_openai_messages, \
+    conversations_store
+from app.api_models import FetchRequest, NightData, LLMResult, ChatMessage, ConversationInfo, ChatRequest, ChatResponse, \
+    GetConversationRequest, GetConversationResponse, AnalyzeRequest, SingleOverrideRequest, SingleOverrideResponse
+from .config import get_settings
 
 # Get application settings
 settings = get_settings()
-
-# In-memory storage for conversations (production would use database)
-conversations_store: Dict[str, Dict] = {}
-
-# Maximum messages to keep in conversation history (to manage token limits)
-MAX_CONVERSATION_HISTORY = 20
 
 # Create FastAPI app with production-ready configuration
 app = FastAPI(
@@ -51,116 +48,6 @@ def health_check():
         }
     }
 
-class FetchRequest(BaseModel):
-    api_key: str  # PriceLabs API key from frontend
-    listing_id: Optional[str] = None  # Listing ID from frontend
-    pms: Optional[str] = None  # PMS from frontend
-    date_from: Optional[str] = None  # yyyy-mm-dd
-    date_to: Optional[str] = None
-
-class NightData(BaseModel):
-    date: str
-    your_price: Optional[float]
-    market_avg_price: Optional[float]
-    occupancy: Optional[float]
-    event: Optional[str]
-    day_of_week: Optional[str]
-    lead_time: Optional[int]
-    # New valuable fields from PriceLabs
-    adr_last_year: Optional[float]  # ADR_STLY - historical benchmark
-    neighborhood_demand: Optional[str]  # nhood_demand - granular demand level
-    min_price_limit: Optional[float]  # minimum_price - pricing floor
-    avg_los_last_year: Optional[float]  # avg_los_STLY - historical stay length
-    seasonal_profile: Optional[str]  # minstay_seasonal_profile - seasonal context
-
-class LLMResult(BaseModel):
-    date: str
-    suggested_price: Optional[float]
-    confidence: Optional[int]
-    explanation: Optional[str]
-    insight_tag: Optional[str]
-
-class ChatMessage(BaseModel):
-    role: str  # "user" or "assistant"
-    content: str
-    timestamp: datetime.datetime
-
-class ConversationInfo(BaseModel):
-    conversation_id: str
-    created_at: datetime.datetime
-    last_message_at: datetime.datetime
-    message_count: int
-    property_context: Optional[dict] = None
-
-class ChatRequest(BaseModel):
-    message: str
-    conversation_id: Optional[str] = None
-    property_context: Optional[dict] = None  # Guest profile, competitive advantage, booking patterns
-
-class ChatResponse(BaseModel):
-    response: str
-    conversation_id: str
-
-class GetConversationRequest(BaseModel):
-    conversation_id: str
-
-class GetConversationResponse(BaseModel):
-    conversation_id: str
-    messages: List[ChatMessage]
-    property_context: Optional[dict] = None
-
-def create_conversation(conversation_id: str, property_context: Optional[dict] = None) -> None:
-    """Create a new conversation in storage"""
-    conversations_store[conversation_id] = {
-        "messages": [],
-        "created_at": datetime.datetime.now(),
-        "last_message_at": datetime.datetime.now(),
-        "property_context": property_context
-    }
-    print(f"📝 Created new conversation: {conversation_id}")
-
-def add_message_to_conversation(conversation_id: str, role: str, content: str) -> None:
-    """Add a message to the conversation history"""
-    if conversation_id not in conversations_store:
-        create_conversation(conversation_id)
-    
-    message = {
-        "role": role,
-        "content": content,
-        "timestamp": datetime.datetime.now()
-    }
-    
-    conversations_store[conversation_id]["messages"].append(message)
-    conversations_store[conversation_id]["last_message_at"] = datetime.datetime.now()
-    
-    # Limit conversation history to prevent token overflow
-    if len(conversations_store[conversation_id]["messages"]) > MAX_CONVERSATION_HISTORY:
-        # Keep the system message (if any) and the most recent messages
-        messages = conversations_store[conversation_id]["messages"]
-        system_messages = [msg for msg in messages if msg["role"] == "system"]
-        recent_messages = messages[-(MAX_CONVERSATION_HISTORY-len(system_messages)):]
-        conversations_store[conversation_id]["messages"] = system_messages + recent_messages
-        print(f"🗂️ Trimmed conversation {conversation_id} to {len(conversations_store[conversation_id]['messages'])} messages")
-
-def get_conversation_messages(conversation_id: str) -> List[Dict]:
-    """Get all messages from a conversation"""
-    if conversation_id not in conversations_store:
-        return []
-    return conversations_store[conversation_id]["messages"]
-
-def build_openai_messages(conversation_id: str, system_prompt: str) -> List[Dict]:
-    """Build OpenAI messages array with conversation history"""
-    messages = [{"role": "system", "content": system_prompt}]
-    
-    # Add conversation history
-    conversation_messages = get_conversation_messages(conversation_id)
-    for msg in conversation_messages:
-        messages.append({
-            "role": msg["role"],
-            "content": msg["content"]
-        })
-    
-    return messages
 
 def extract_occupancy_for_date(nb_data, target_date, property_bedrooms="3"):
     """
@@ -659,9 +546,6 @@ def fetch_pricing_data(req: FetchRequest):
         traceback.print_exc()
         raise HTTPException(status_code=500, detail="Internal server error occurred while fetching pricing data")
 
-class AnalyzeRequest(BaseModel):
-    nights: List[NightData]
-    model: Optional[str] = "gpt-4"
 
 @app.post("/analyze-pricing", response_model=List[LLMResult])
 def analyze_pricing(req: AnalyzeRequest):
@@ -1125,22 +1009,6 @@ def delete_conversation(conversation_id: str):
     
     return {"message": f"Conversation {conversation_id} deleted successfully"}
 
-class SingleOverrideRequest(BaseModel):
-    api_key: str
-    listing_id: str
-    pms: str
-    date: str
-    price: float
-    price_type: str = "fixed"  # Default to fixed
-    currency: str = "USD"
-    reason: str = "Manual update via mAIrble"
-    update_children: bool = False
-
-class SingleOverrideResponse(BaseModel):
-    success: bool
-    message: str
-    updated_date: Optional[str] = None
-    error_details: Optional[str] = None
 
 @app.post("/update-single-price", response_model=SingleOverrideResponse)
 def update_single_price(req: SingleOverrideRequest):
