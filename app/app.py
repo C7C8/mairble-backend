@@ -1105,7 +1105,3 @@ def update_single_price(req: SingleOverrideRequest):
             message=f"Internal error: {str(e)}",
             error_details=str(e)
         )
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("app:app", host="127.0.0.1", port=8000, reload=True) 
